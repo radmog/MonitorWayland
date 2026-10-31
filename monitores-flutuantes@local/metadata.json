@@ -1,0 +1,7 @@
+{
+  "uuid": "monitores-flutuantes@local",
+  "name": "Monitores Flutuantes",
+  "description": "Monitores de sistema flutuantes no desktop (estilo Conky) para GNOME Shell no Wayland.",
+  "shell-version": ["50"],
+  "version": 1
+}
