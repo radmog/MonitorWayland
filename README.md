@@ -6,16 +6,25 @@ O GNOME não suporta `wlr-layer-shell`, então o Conky não consegue se fixar no
 
 ## O que mostra
 
+O painel tem duas colunas, que se movem juntas.
+
+**Esquerda (hardware)**
 - Relógio e data
-- CPU, memória, swap e disco `/` (barras: amarelo > 75%, vermelho > 90%)
-- Gráficos de histórico (sparklines) de 60 s para CPU, memória e rede
+- CPU com histórico, uso por núcleo e frequência
+- Memória (com histórico), swap e disco `/` (barras: amarelo > 75%, vermelho > 90%)
 - Temperatura da CPU (hwmon) com histórico
 - Bateria (`BAT0`–`BAT3`), quando existir: barra que alerta com carga baixa
-- Rede (download/upload), I/O de disco (leitura/escrita) com histórico
-- Top 4 processos por CPU, com uso de memória
-- Carga do sistema e uptime
+- Pressão do sistema (PSI) de CPU, memória e I/O
 
-Atualização a cada segundo. Os dados vêm de `/proc` e do GIO, sem dependências externas.
+**Direita**
+- Rede (download/upload) com histórico, IP e SSID da conexão primária (NetworkManager) e IP do Tailscale, sempre visível
+- I/O de disco (leitura/escrita) com histórico
+- Top 4 processos por CPU, com uso de memória
+- Volume e música tocando (MPRIS)
+- Calendário do mês e próximos eventos (mesmo serviço de calendário do GNOME)
+- Carga do sistema, uptime e atualizações pendentes (lidas de `/var/lib/update-notifier/updates-available`)
+
+Atualização a cada segundo. Os dados vêm de `/proc`, `/sys`, GIO, D-Bus e libs do próprio Shell, sem dependências externas.
 
 ## Requisitos
 

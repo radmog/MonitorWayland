@@ -1,9 +1,13 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Gvc from 'gi://Gvc';
+import NM from 'gi://NM';
+import Pango from 'gi://Pango';
 import St from 'gi://St';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import * as Calendar from 'resource:///org/gnome/shell/ui/calendar.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const INTERVAL_SECONDS = 1;
@@ -15,6 +19,14 @@ const DISK_DEVICE = /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+|mmcblk\d+)$/;
 const TOP_PROCESSES = 4;
 const CLOCK_TICKS = 100;
 const PAGE_SIZE = 4096;
+const UPDATES_FILE = '/var/lib/update-notifier/updates-available';
+const UPDATES_EVERY = 60;
+const UPCOMING_EVENTS = 3;
+const EVENTS_WINDOW_DAYS = 14;
+const TAILSCALE_IFACE = 'tailscale0';
+const WEEKDAYS = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'];
+
+Gio._promisify(Gio.DBusConnection.prototype, 'call', 'call_finish');
 
 function readText(path) {
     try {
@@ -118,6 +130,42 @@ class Sparkline {
     }
 }
 
+// Uma coluna por núcleo, altura proporcional ao uso.
+class CoreBars {
+    constructor(parent) {
+        this._usage = [];
+        this.actor = new St.DrawingArea({style_class: 'mf-spark', x_expand: true, height: 22});
+        this.actor.connect('repaint', area => this._draw(area));
+        parent.add_child(this.actor);
+    }
+
+    set(usage) {
+        this._usage = usage;
+        this.actor.queue_repaint();
+    }
+
+    _draw(area) {
+        const cr = area.get_context();
+        const [w, h] = area.get_surface_size();
+        const n = this._usage.length;
+        if (n) {
+            const gap = 3;
+            const bw = (w - gap * (n - 1)) / n;
+            this._usage.forEach((u, i) => {
+                const x = i * (bw + gap);
+                cr.setSourceRGBA(1, 1, 1, 0.12);
+                cr.rectangle(x, 0, bw, h);
+                cr.fill();
+                const [r, g, b] = u > 0.9 ? [0.93, 0.2, 0.23] : u > 0.75 ? [0.96, 0.76, 0.07] : [0.38, 0.63, 0.92];
+                cr.setSourceRGBA(r, g, b, 1);
+                cr.rectangle(x, h - u * h, bw, u * h);
+                cr.fill();
+            });
+        }
+        cr.$dispose();
+    }
+}
+
 class Bar {
     constructor(parent, label, {history = false, historyMax = 1, invert = false} = {}) {
         this._invert = invert;
@@ -156,6 +204,10 @@ export default class MonitoresFlutuantes extends Extension {
         this._prevNet = null;
         this._prevDisk = null;
         this._prevProcs = null;
+        this._cancellable = new Gio.Cancellable();
+        this._refreshCount = 0;
+        this._calendarDay = null;
+        this._mprisBusy = false;
         this._tempPath = findCpuTempPath();
         this._batteryPath = findBatteryPath();
         this._dragging = false;
@@ -170,6 +222,10 @@ export default class MonitoresFlutuantes extends Extension {
         this._loadConfig();
         Main.layoutManager._backgroundGroup.add_child(this._panel);
 
+        this._startNetworkManager();
+        this._startMixer();
+        this._startEventSource();
+
         this._refresh();
         this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, INTERVAL_SECONDS, () => {
             this._refresh();
@@ -183,6 +239,16 @@ export default class MonitoresFlutuantes extends Extension {
             this._timeoutId = null;
         }
         this._endDrag();
+        this._cancellable?.cancel();
+        this._cancellable = null;
+        this._nm = null;
+        this._mixer?.close();
+        this._mixer = null;
+        if (this._eventSource) {
+            this._eventSource.disconnect(this._eventsChangedId);
+            this._eventSource.destroy();
+            this._eventSource = null;
+        }
         if (this._bgSettings) {
             this._bgSettings.set_string('picture-uri', this._bgOriginal.light);
             this._bgSettings.set_string('picture-uri-dark', this._bgOriginal.dark);
@@ -238,40 +304,52 @@ export default class MonitoresFlutuantes extends Extension {
 
     _buildPanel() {
         this._panel = new St.BoxLayout({
-            vertical: true,
             style_class: 'mf-panel',
             reactive: true,
             track_hover: true,
         });
+        // esquerda: hardware; direita: rede, processos, mídia e agenda
+        const left = new St.BoxLayout({vertical: true, style_class: 'mf-column'});
+        const right = new St.BoxLayout({vertical: true, style_class: 'mf-column'});
+        this._panel.add_child(left);
+        this._panel.add_child(right);
+        let col = left;
 
         this._clock = new St.Label({style_class: 'mf-clock'});
         this._date = new St.Label({style_class: 'mf-date'});
-        this._panel.add_child(this._clock);
-        this._panel.add_child(this._date);
-        this._panel.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
+        col.add_child(this._clock);
+        col.add_child(this._date);
+        col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
 
-        this._bars = {
-            cpu: new Bar(this._panel, 'CPU', {history: true}),
-            mem: new Bar(this._panel, 'Memória', {history: true}),
-            swap: new Bar(this._panel, 'Swap'),
-            disk: new Bar(this._panel, 'Disco /'),
-        };
+        this._bars = {cpu: new Bar(col, 'CPU', {history: true})};
+        this._coreBars = new CoreBars(col);
+        this._freq = new St.Label({style_class: 'mf-label'});
+        col.add_child(this._freq);
+        this._bars.mem = new Bar(col, 'Memória', {history: true});
+        this._bars.swap = new Bar(col, 'Swap');
+        this._bars.disk = new Bar(col, 'Disco /');
         if (this._tempPath)
-            this._bars.temp = new Bar(this._panel, 'Temperatura', {history: true, historyMax: 1});
+            this._bars.temp = new Bar(col, 'Temperatura', {history: true, historyMax: 1});
         if (this._batteryPath)
-            this._bars.battery = new Bar(this._panel, 'Bateria', {invert: true});
+            this._bars.battery = new Bar(col, 'Bateria', {invert: true});
+        this._pressure = new St.Label({style_class: 'mf-label'});
+        col.add_child(this._pressure);
 
-        this._panel.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
+        col = right;
         this._net = new St.Label({style_class: 'mf-label'});
-        this._panel.add_child(this._net);
+        col.add_child(this._net);
         // verde = download, laranja = upload
-        this._netSpark = new Sparkline(this._panel, [[0.34, 0.8, 0.52], [0.96, 0.47, 0]]);
+        this._netSpark = new Sparkline(col, [[0.34, 0.8, 0.52], [0.96, 0.47, 0]]);
+        this._ip = new St.Label({style_class: 'mf-label'});
+        this._tailscale = new St.Label({style_class: 'mf-label'});
+        col.add_child(this._ip);
+        col.add_child(this._tailscale);
         this._diskIo = new St.Label({style_class: 'mf-label'});
-        this._panel.add_child(this._diskIo);
+        col.add_child(this._diskIo);
         // azul = leitura, laranja = escrita
-        this._diskSpark = new Sparkline(this._panel, [[0.38, 0.63, 0.92], [0.96, 0.47, 0]]);
+        this._diskSpark = new Sparkline(col, [[0.38, 0.63, 0.92], [0.96, 0.47, 0]]);
 
-        this._panel.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
+        col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
         this._procRows = [];
         for (let i = 0; i < TOP_PROCESSES; i++) {
             const row = new St.BoxLayout({x_expand: true});
@@ -279,14 +357,36 @@ export default class MonitoresFlutuantes extends Extension {
             const value = new St.Label({style_class: 'mf-value'});
             row.add_child(name);
             row.add_child(value);
-            this._panel.add_child(row);
+            col.add_child(row);
             this._procRows.push({name, value});
         }
 
+        col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
+        this._bars.volume = new Bar(col, 'Volume');
+        this._music = new St.Label({style_class: 'mf-label'});
+        this._music.clutter_text.set_ellipsize(Pango.EllipsizeMode.END);
+        col.add_child(this._music);
+
+        col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
+        this._calTitle = new St.Label({style_class: 'mf-value'});
+        this._calGrid = new St.BoxLayout({vertical: true, x_expand: true});
+        col.add_child(this._calTitle);
+        col.add_child(this._calGrid);
+        this._eventRows = [];
+        for (let i = 0; i < UPCOMING_EVENTS; i++) {
+            const label = new St.Label({style_class: 'mf-label'});
+            label.clutter_text.set_ellipsize(Pango.EllipsizeMode.END);
+            col.add_child(label);
+            this._eventRows.push(label);
+        }
+
+        col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
         this._load = new St.Label({style_class: 'mf-label'});
         this._uptime = new St.Label({style_class: 'mf-label'});
-        this._panel.add_child(this._load);
-        this._panel.add_child(this._uptime);
+        this._updates = new St.Label({style_class: 'mf-label'});
+        col.add_child(this._load);
+        col.add_child(this._uptime);
+        col.add_child(this._updates);
 
         this._panel.connect('button-press-event', (actor, event) => {
             const button = event.get_button();
@@ -378,6 +478,13 @@ export default class MonitoresFlutuantes extends Extension {
         this._updateBattery();
         this._updateDiskIo();
         this._updateProcesses();
+        this._updatePressure();
+        this._updateNetworkInfo();
+        this._updateVolume();
+        this._updateMusic();
+        this._updateCalendar();
+        if (this._refreshCount++ % UPDATES_EVERY === 0)
+            this._updateUpdates();
 
         const load = readText('/proc/loadavg').split(' ');
         this._load.text = `Carga: ${load.slice(0, 3).join('  ')}`;
@@ -386,16 +493,33 @@ export default class MonitoresFlutuantes extends Extension {
     }
 
     _updateCpu() {
-        const line = readText('/proc/stat').split('\n')[0].trim().split(/\s+/).slice(1).map(Number);
-        const idle = line[3] + (line[4] || 0);
-        const total = line.reduce((a, b) => a + b, 0);
-        if (this._prevCpu) {
-            const dTotal = total - this._prevCpu.total;
-            const dIdle = idle - this._prevCpu.idle;
-            const usage = dTotal > 0 ? 1 - dIdle / dTotal : 0;
-            this._bars.cpu.update(usage, `${Math.round(usage * 100)}%`);
+        const stats = [];
+        for (const l of readText('/proc/stat').split('\n')) {
+            if (!/^cpu\d*\s/.test(l))
+                continue;
+            const f = l.trim().split(/\s+/).slice(1).map(Number);
+            stats.push({idle: f[3] + (f[4] || 0), total: f.reduce((a, b) => a + b, 0)});
         }
-        this._prevCpu = {idle, total};
+        if (this._prevCpu?.length === stats.length) {
+            const usage = stats.map((st, i) => {
+                const dTotal = st.total - this._prevCpu[i].total;
+                return dTotal > 0 ? 1 - (st.idle - this._prevCpu[i].idle) / dTotal : 0;
+            });
+            this._bars.cpu.update(usage[0], `${Math.round(usage[0] * 100)}%`);
+            this._coreBars.set(usage.slice(1));
+        }
+        this._prevCpu = stats;
+
+        const freqs = [];
+        for (let i = 0; i < stats.length - 1; i++) {
+            const khz = parseInt(readText(`/sys/devices/system/cpu/cpu${i}/cpufreq/scaling_cur_freq`));
+            if (Number.isFinite(khz))
+                freqs.push(khz / 1e6);
+        }
+        if (freqs.length) {
+            const avg = freqs.reduce((a, b) => a + b, 0) / freqs.length;
+            this._freq.text = `Freq: ${avg.toFixed(2)} GHz  (máx ${Math.max(...freqs).toFixed(2)})`;
+        }
     }
 
     _updateMemory() {
@@ -521,5 +645,186 @@ export default class MonitoresFlutuantes extends Extension {
             });
         }
         this._prevProcs = {t, ticks: new Map([...procs].map(([pid, p]) => [pid, p.ticks]))};
+    }
+
+    _updatePressure() {
+        const parts = ['cpu', 'memory', 'io'].map(res => {
+            const m = readText(`/proc/pressure/${res}`).match(/some avg10=([\d.]+)/);
+            return m ? `${parseFloat(m[1]).toFixed(1)}%` : 'n/d';
+        });
+        this._pressure.text = `Pressão: CPU ${parts[0]}  Mem ${parts[1]}  I/O ${parts[2]}`;
+    }
+
+    _startNetworkManager() {
+        this._nm = null;
+        NM.Client.new_async(this._cancellable, (obj, res) => {
+            try {
+                this._nm = NM.Client.new_finish(res);
+            } catch (e) {
+                if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                    console.error(`monitores-flutuantes: falha ao conectar ao NetworkManager: ${e}`);
+            }
+        });
+    }
+
+    _ip4Address(device) {
+        return device?.get_ip4_config()?.get_addresses()[0]?.get_address() ?? null;
+    }
+
+    // Tailscale sempre aparece: sem a interface ou sem IP, mostra "desconectado".
+    _updateNetworkInfo() {
+        let ip = 'sem conexão', tailscale = 'desconectado';
+        if (this._nm) {
+            const device = this._nm.get_primary_connection()?.get_devices()[0];
+            const addr = this._ip4Address(device);
+            if (addr) {
+                let name = device.get_iface();
+                if (device.get_device_type() === NM.DeviceType.WIFI) {
+                    const ssid = device.get_active_access_point()?.get_ssid();
+                    name = ssid ? NM.utils_ssid_to_utf8(ssid.toArray()) : 'Wi-Fi';
+                } else if (device.get_device_type() === NM.DeviceType.ETHERNET) {
+                    name = 'Cabo';
+                }
+                ip = `${name} · ${addr}`;
+            }
+            const ts = this._ip4Address(this._nm.get_device_by_iface(TAILSCALE_IFACE));
+            if (ts)
+                tailscale = ts;
+        } else {
+            ip = 'NetworkManager indisponível';
+        }
+        this._ip.text = `IP: ${ip}`;
+        this._tailscale.text = `Tailscale: ${tailscale}`;
+    }
+
+    _startMixer() {
+        this._mixer = new Gvc.MixerControl({name: 'Monitores Flutuantes'});
+        this._mixer.open();
+    }
+
+    _updateVolume() {
+        const sink = this._mixer?.get_default_sink();
+        if (!sink) {
+            this._bars.volume.update(0, 'n/d', {alert: false});
+            return;
+        }
+        const fraction = sink.volume / this._mixer.get_vol_max_norm();
+        this._bars.volume.update(sink.is_muted ? 0 : fraction,
+            sink.is_muted ? 'mudo' : `${Math.round(fraction * 100)}%`, {alert: false});
+    }
+
+    // MPRIS: prefere um player tocando; senão, o primeiro pausado.
+    async _updateMusic() {
+        if (this._mprisBusy)
+            return;
+        this._mprisBusy = true;
+        try {
+            const call = (name, path, iface, method, params, type) => Gio.DBus.session.call(
+                name, path, iface, method, params, GLib.VariantType.new(type),
+                Gio.DBusCallFlags.NONE, 500, this._cancellable);
+
+            const names = (await call('org.freedesktop.DBus', '/org/freedesktop/DBus',
+                'org.freedesktop.DBus', 'ListNames', null, '(as)')).deepUnpack()[0]
+                .filter(n => n.startsWith('org.mpris.MediaPlayer2.'));
+
+            let best = null;
+            for (const name of names) {
+                const props = (await call(name, '/org/mpris/MediaPlayer2', 'org.freedesktop.DBus.Properties',
+                    'GetAll', new GLib.Variant('(s)', ['org.mpris.MediaPlayer2.Player']), '(a{sv})'))
+                    .recursiveUnpack()[0];
+                if (!best || props.PlaybackStatus === 'Playing')
+                    best = props;
+                if (props.PlaybackStatus === 'Playing')
+                    break;
+            }
+            if (!this._panel)
+                return;
+            if (!best?.Metadata?.['xesam:title']) {
+                this._music.text = '♪ nada tocando';
+                return;
+            }
+            const artist = [best.Metadata['xesam:artist']].flat().filter(Boolean).join(', ');
+            const icon = best.PlaybackStatus === 'Playing' ? '▶' : '⏸';
+            this._music.text = `${icon} ${artist ? `${artist} – ` : ''}${best.Metadata['xesam:title']}`;
+        } catch (e) {
+            if (this._panel)
+                this._music.text = '♪ nada tocando';
+        } finally {
+            this._mprisBusy = false;
+        }
+    }
+
+    _startEventSource() {
+        this._eventSource = new Calendar.DBusEventSource();
+        this._eventsChangedId = this._eventSource.connect('changed', () => this._updateEvents());
+    }
+
+    _updateCalendar() {
+        const now = GLib.DateTime.new_now_local();
+        const day = now.format('%Y-%m-%d');
+        if (day !== this._calendarDay) {
+            this._calendarDay = day;
+            this._buildMonth(now);
+            const begin = new Date();
+            begin.setHours(0, 0, 0, 0);
+            const end = new Date(begin.getTime() + EVENTS_WINDOW_DAYS * 86400000);
+            this._eventSource.requestRange(begin, end);
+        }
+        this._updateEvents();
+    }
+
+    _buildMonth(now) {
+        this._calTitle.text = now.format('%B %Y');
+        this._calGrid.destroy_all_children();
+
+        const cell = (text, style = '') => new St.Label({text, style_class: `mf-cal-day ${style}`, x_expand: true});
+        const header = new St.BoxLayout({x_expand: true});
+        WEEKDAYS.forEach(d => header.add_child(cell(d, 'mf-cal-head')));
+        this._calGrid.add_child(header);
+
+        const year = now.get_year(), month = now.get_month();
+        const offset = GLib.DateTime.new_local(year, month, 1, 0, 0, 0).get_day_of_week() % 7;
+        const total = GLib.Date.get_days_in_month(month, year);
+        let row = null;
+        for (let i = 0; i < Math.ceil((offset + total) / 7) * 7; i++) {
+            if (i % 7 === 0) {
+                row = new St.BoxLayout({x_expand: true});
+                this._calGrid.add_child(row);
+            }
+            const d = i - offset + 1;
+            row.add_child(d < 1 || d > total
+                ? cell('')
+                : cell(`${d}`, d === now.get_day_of_month() ? 'mf-cal-today' : ''));
+        }
+    }
+
+    _updateEvents() {
+        const now = new Date();
+        const end = new Date(now.getTime() + EVENTS_WINDOW_DAYS * 86400000);
+        const events = this._eventSource.getEvents(now, end)
+            .filter(e => e.end > now).slice(0, UPCOMING_EVENTS);
+        this._eventRows.forEach((label, i) => {
+            const e = events[i];
+            if (!e) {
+                label.text = i === 0 ? 'Sem eventos próximos' : '';
+                return;
+            }
+            const when = GLib.DateTime.new_from_unix_local(Math.floor(e.date.getTime() / 1000));
+            const allDay = e.date.getHours() === 0 && e.date.getMinutes() === 0 &&
+                (e.end - e.date) % 86400000 === 0;
+            label.text = `${when.format(allDay ? '%d/%m' : '%d/%m %H:%M')}  ${e.summary}`;
+        });
+    }
+
+    // Arquivo mantido pelo update-notifier; evita consultar o apt.
+    _updateUpdates() {
+        const text = readText(UPDATES_FILE);
+        const total = text.match(/(\d+) updates? can be applied/);
+        if (!total) {
+            this._updates.text = 'Atualizações: n/d';
+            return;
+        }
+        const security = text.match(/(\d+) of these updates? (?:is|are) (?:a )?standard security/);
+        this._updates.text = `Atualizações: ${total[1]}` + (security ? ` (${security[1]} de segurança)` : '');
     }
 }
