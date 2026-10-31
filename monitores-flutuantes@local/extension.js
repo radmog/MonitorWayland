@@ -10,6 +10,11 @@ const INTERVAL_SECONDS = 1;
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'];
 const PANEL_BG_DEFAULT = 'rgba(15, 17, 22, 0.62)';
 const DECODER = new TextDecoder();
+const CPU_SENSORS = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'acpitz'];
+const DISK_DEVICE = /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+|mmcblk\d+)$/;
+const TOP_PROCESSES = 4;
+const CLOCK_TICKS = 100;
+const PAGE_SIZE = 4096;
 
 function readText(path) {
     try {
@@ -35,6 +40,28 @@ function formatDuration(seconds) {
     const h = Math.floor((seconds % 86400) / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     return d > 0 ? `${d}d ${h}h ${m}m` : `${h}h ${m}m`;
+}
+
+// Caminho do sensor de temperatura da CPU: o primeiro hwmon de CPU_SENSORS, por ordem de preferência.
+function findCpuTempPath() {
+    const found = {};
+    for (let i = 0; i < 32; i++) {
+        const base = `/sys/class/hwmon/hwmon${i}`;
+        const name = readText(`${base}/name`).trim();
+        if (name && !(name in found) && readText(`${base}/temp1_input`))
+            found[name] = `${base}/temp1_input`;
+    }
+    const name = CPU_SENSORS.find(n => n in found);
+    return name ? found[name] : null;
+}
+
+function findBatteryPath() {
+    for (let i = 0; i < 4; i++) {
+        const base = `/sys/class/power_supply/BAT${i}`;
+        if (readText(`${base}/capacity`))
+            return base;
+    }
+    return null;
 }
 
 // Gráfico de histórico: uma ou mais séries desenhadas com Cairo.
@@ -92,7 +119,8 @@ class Sparkline {
 }
 
 class Bar {
-    constructor(parent, label, {history = false} = {}) {
+    constructor(parent, label, {history = false, historyMax = 1, invert = false} = {}) {
+        this._invert = invert;
         const row = new St.BoxLayout({x_expand: true});
         this._label = new St.Label({text: label, style_class: 'mf-label', x_expand: true});
         this._value = new St.Label({text: '-', style_class: 'mf-value'});
@@ -105,16 +133,19 @@ class Bar {
         this._bg.add_child(this._fill);
         parent.add_child(this._bg);
 
-        this._spark = history ? new Sparkline(parent, [[0.38, 0.63, 0.92]], {max: 1}) : null;
+        this._spark = history ? new Sparkline(parent, [[0.38, 0.63, 0.92]], {max: historyMax}) : null;
     }
 
-    update(fraction, text) {
+    // `invert`: valores baixos são o estado ruim (ex.: bateria).
+    update(fraction, text, {alert = true} = {}) {
         fraction = Math.max(0, Math.min(1, fraction));
         this._spark?.push(fraction);
         this._value.text = text;
         const width = this._bg.width;
         this._fill.width = Math.round(width * fraction);
-        this._fill.style_class = 'mf-bar-fill' + (fraction > 0.9 ? ' crit' : fraction > 0.75 ? ' warn' : '');
+        const level = this._invert ? 1 - fraction : fraction;
+        const state = !alert ? '' : level > 0.9 ? ' crit' : level > 0.75 ? ' warn' : '';
+        this._fill.style_class = `mf-bar-fill${state}`;
     }
 }
 
@@ -123,6 +154,10 @@ export default class MonitoresFlutuantes extends Extension {
         this._configPath = GLib.build_filenamev([GLib.get_user_config_dir(), 'monitores-flutuantes.json']);
         this._prevCpu = null;
         this._prevNet = null;
+        this._prevDisk = null;
+        this._prevProcs = null;
+        this._tempPath = findCpuTempPath();
+        this._batteryPath = findBatteryPath();
         this._dragging = false;
         this._bgSettings = new Gio.Settings({schema_id: 'org.gnome.desktop.background'});
         this._bgOriginal = {
@@ -221,12 +256,33 @@ export default class MonitoresFlutuantes extends Extension {
             swap: new Bar(this._panel, 'Swap'),
             disk: new Bar(this._panel, 'Disco /'),
         };
+        if (this._tempPath)
+            this._bars.temp = new Bar(this._panel, 'Temperatura', {history: true, historyMax: 1});
+        if (this._batteryPath)
+            this._bars.battery = new Bar(this._panel, 'Bateria', {invert: true});
 
         this._panel.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
         this._net = new St.Label({style_class: 'mf-label'});
         this._panel.add_child(this._net);
         // verde = download, laranja = upload
         this._netSpark = new Sparkline(this._panel, [[0.34, 0.8, 0.52], [0.96, 0.47, 0]]);
+        this._diskIo = new St.Label({style_class: 'mf-label'});
+        this._panel.add_child(this._diskIo);
+        // azul = leitura, laranja = escrita
+        this._diskSpark = new Sparkline(this._panel, [[0.38, 0.63, 0.92], [0.96, 0.47, 0]]);
+
+        this._panel.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
+        this._procRows = [];
+        for (let i = 0; i < TOP_PROCESSES; i++) {
+            const row = new St.BoxLayout({x_expand: true});
+            const name = new St.Label({style_class: 'mf-label', x_expand: true});
+            const value = new St.Label({style_class: 'mf-value'});
+            row.add_child(name);
+            row.add_child(value);
+            this._panel.add_child(row);
+            this._procRows.push({name, value});
+        }
+
         this._load = new St.Label({style_class: 'mf-label'});
         this._uptime = new St.Label({style_class: 'mf-label'});
         this._panel.add_child(this._load);
@@ -318,6 +374,10 @@ export default class MonitoresFlutuantes extends Extension {
         this._updateMemory();
         this._updateDisk();
         this._updateNet();
+        this._updateTemp();
+        this._updateBattery();
+        this._updateDiskIo();
+        this._updateProcesses();
 
         const load = readText('/proc/loadavg').split(' ');
         this._load.text = `Carga: ${load.slice(0, 3).join('  ')}`;
@@ -383,5 +443,83 @@ export default class MonitoresFlutuantes extends Extension {
             this._netSpark.push(down, up);
         }
         this._prevNet = {rx, tx, t};
+    }
+
+    _updateTemp() {
+        if (!this._bars.temp)
+            return;
+        const celsius = parseInt(readText(this._tempPath)) / 1000;
+        if (Number.isFinite(celsius))
+            this._bars.temp.update(celsius / 100, `${Math.round(celsius)}°C`);
+    }
+
+    _updateBattery() {
+        if (!this._bars.battery)
+            return;
+        const capacity = parseInt(readText(`${this._batteryPath}/capacity`));
+        const status = readText(`${this._batteryPath}/status`).trim();
+        const labels = {Charging: 'carregando', Discharging: 'descarregando', Full: 'cheia'};
+        this._bars.battery.update(capacity / 100, `${capacity}% · ${labels[status] ?? 'conectada'}`,
+            {alert: status !== 'Charging' && status !== 'Full'});
+    }
+
+    _updateDiskIo() {
+        let read = 0, written = 0;
+        for (const l of readText('/proc/diskstats').split('\n')) {
+            const f = l.trim().split(/\s+/);
+            if (DISK_DEVICE.test(f[2] ?? '')) {
+                read += Number(f[5]) * 512;
+                written += Number(f[9]) * 512;
+            }
+        }
+        const t = GLib.get_monotonic_time() / 1e6;
+        if (this._prevDisk) {
+            const dt = t - this._prevDisk.t || 1;
+            const r = Math.max(0, (read - this._prevDisk.read) / dt);
+            const w = Math.max(0, (written - this._prevDisk.written) / dt);
+            this._diskIo.text = `Disco I/O: R ${formatBytes(r)}/s   W ${formatBytes(w)}/s`;
+            this._diskSpark.push(r, w);
+        }
+        this._prevDisk = {read, written, t};
+    }
+
+    // Uso de CPU por processo = variação de utime+stime entre duas leituras.
+    _updateProcesses() {
+        const t = GLib.get_monotonic_time() / 1e6;
+        const procs = new Map();
+        try {
+            const en = Gio.File.new_for_path('/proc').enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            let info;
+            while ((info = en.next_file(null))) {
+                const pid = info.get_name();
+                if (!/^\d+$/.test(pid))
+                    continue;
+                const stat = readText(`/proc/${pid}/stat`);
+                const end = stat.lastIndexOf(')');
+                if (end < 0)
+                    continue;
+                const f = stat.slice(end + 2).split(' ');
+                procs.set(pid, {
+                    name: stat.slice(stat.indexOf('(') + 1, end),
+                    ticks: Number(f[11]) + Number(f[12]),
+                    rss: Number(f[21]) * PAGE_SIZE,
+                });
+            }
+        } catch (e) {
+            return;
+        }
+
+        if (this._prevProcs) {
+            const dt = (t - this._prevProcs.t) || 1;
+            const top = [...procs].map(([pid, p]) => {
+                const before = this._prevProcs.ticks.get(pid);
+                return {...p, cpu: before === undefined ? 0 : Math.max(0, p.ticks - before) / CLOCK_TICKS / dt};
+            }).sort((a, b) => b.cpu - a.cpu || b.rss - a.rss).slice(0, TOP_PROCESSES);
+            this._procRows.forEach((row, i) => {
+                row.name.text = top[i]?.name ?? '';
+                row.value.text = top[i] ? `${Math.round(top[i].cpu * 100)}%  ${formatBytes(top[i].rss)}` : '';
+            });
+        }
+        this._prevProcs = {t, ticks: new Map([...procs].map(([pid, p]) => [pid, p.ticks]))};
     }
 }

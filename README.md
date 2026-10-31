@@ -9,7 +9,11 @@ O GNOME não suporta `wlr-layer-shell`, então o Conky não consegue se fixar no
 - Relógio e data
 - CPU, memória, swap e disco `/` (barras: amarelo > 75%, vermelho > 90%)
 - Gráficos de histórico (sparklines) de 60 s para CPU, memória e rede
-- Rede (download/upload), carga do sistema e uptime
+- Temperatura da CPU (hwmon) com histórico
+- Bateria (`BAT0`–`BAT3`), quando existir: barra que alerta com carga baixa
+- Rede (download/upload), I/O de disco (leitura/escrita) com histórico
+- Top 4 processos por CPU, com uso de memória
+- Carga do sistema e uptime
 
 Atualização a cada segundo. Os dados vêm de `/proc` e do GIO, sem dependências externas.
 
