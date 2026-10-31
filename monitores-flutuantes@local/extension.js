@@ -3,6 +3,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import NM from 'gi://NM';
 import Pango from 'gi://Pango';
+import Soup from 'gi://Soup?version=3.0';
 import St from 'gi://St';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -21,6 +22,9 @@ const PAGE_SIZE = 4096;
 const UPCOMING_EVENTS = 3;
 const EVENTS_WINDOW_DAYS = 14;
 const TAILSCALE_IFACE = 'tailscale0';
+const PUBLIC_IP_URL = 'https://api.ipify.org';
+const PUBLIC_IP_REFRESH_SECONDS = 600;
+const PUBLIC_IP_RETRY_SECONDS = 30;
 const WEEKDAYS = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'];
 
 function readText(path) {
@@ -205,10 +209,10 @@ export default class MonitoresFlutuantes extends Extension {
         this._buildPanels();
         this._themes = this._loadThemes();
         Main.layoutManager._backgroundGroup.add_child(this._left);
-        Main.layoutManager._backgroundGroup.add_child(this._right);
         this._loadConfig();
 
         this._startNetworkManager();
+        this._startPublicIp();
         this._startEventSource();
 
         this._refresh();
@@ -226,6 +230,12 @@ export default class MonitoresFlutuantes extends Extension {
         this._endDrag();
         this._cancellable?.cancel();
         this._cancellable = null;
+        if (this._publicIpTimeoutId) {
+            GLib.Source.remove(this._publicIpTimeoutId);
+            this._publicIpTimeoutId = null;
+        }
+        this._soup?.abort();
+        this._soup = null;
         this._nm = null;
         if (this._eventSource) {
             this._eventSource.disconnect(this._eventsChangedId);
@@ -239,9 +249,7 @@ export default class MonitoresFlutuantes extends Extension {
         this._bgSettings = null;
         this._themes = null;
         this._left?.destroy();
-        this._right?.destroy();
         this._left = null;
-        this._right = null;
         this._bars = null;
     }
 
@@ -284,8 +292,7 @@ export default class MonitoresFlutuantes extends Extension {
         const theme = this._themes[this._themeIndex];
         this._bgSettings.set_string('picture-uri', theme.uri);
         this._bgSettings.set_string('picture-uri-dark', theme.uri);
-        for (const panel of [this._left, this._right])
-            panel.set_style(`background-color: ${theme.painel};`);
+        this._left.set_style(`background-color: ${theme.painel};`);
     }
 
     _makePanel() {
@@ -310,7 +317,7 @@ export default class MonitoresFlutuantes extends Extension {
         return panel;
     }
 
-    // esquerda: hardware, processos e rede; direita: agenda
+    // hardware, processos, rede e agenda
     _buildPanels() {
         let col = this._left = this._makePanel();
 
@@ -349,11 +356,13 @@ export default class MonitoresFlutuantes extends Extension {
         // verde = download, laranja = upload
         this._netSpark = new Sparkline(col, [[0.34, 0.8, 0.52], [0.96, 0.47, 0]]);
         this._ip = new St.Label({style_class: 'mf-label'});
+        this._publicIp = new St.Label({style_class: 'mf-label', text: 'IP público: ...'});
         this._tailscale = new St.Label({style_class: 'mf-label'});
         col.add_child(this._ip);
+        col.add_child(this._publicIp);
         col.add_child(this._tailscale);
 
-        col = this._right = this._makePanel();
+        col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
         this._calTitle = new St.Label({style_class: 'mf-value'});
         this._calGrid = new St.BoxLayout({vertical: true, x_expand: true});
         col.add_child(this._calTitle);
@@ -397,27 +406,19 @@ export default class MonitoresFlutuantes extends Extension {
         this._dragging = false;
     }
 
-    // Padrão: um painel em cada lado do monitor primário.
     _loadConfig() {
         const monitor = Main.layoutManager.primaryMonitor;
-        const [, rightWidth] = this._right.get_preferred_width(-1);
-        const pos = {
-            left: [monitor.x + MARGIN, monitor.y + 60],
-            right: [monitor.x + monitor.width - rightWidth - MARGIN, monitor.y + 60],
-        };
+        let pos = [monitor.x + MARGIN, monitor.y + 60];
         let tema = null;
         try {
             const cfg = JSON.parse(readText(this._configPath));
-            for (const side of ['left', 'right']) {
-                if (Number.isFinite(cfg[side]?.x) && Number.isFinite(cfg[side]?.y))
-                    pos[side] = [cfg[side].x, cfg[side].y];
-            }
+            if (Number.isFinite(cfg.left?.x) && Number.isFinite(cfg.left?.y))
+                pos = [cfg.left.x, cfg.left.y];
             tema = cfg.tema ?? null;
         } catch (e) {
             // sem configuração salva: usa os padrões
         }
-        this._left.set_position(...pos.left);
-        this._right.set_position(...pos.right);
+        this._left.set_position(...pos);
         this._themeIndex = Math.max(0, this._themes.findIndex(t => t.nome === tema));
         this._applyTheme(this._themeIndex);
     }
@@ -426,7 +427,6 @@ export default class MonitoresFlutuantes extends Extension {
         try {
             const data = JSON.stringify({
                 left: {x: this._left.x, y: this._left.y},
-                right: {x: this._right.x, y: this._right.y},
                 tema: this._themes[this._themeIndex]?.nome ?? null,
             });
             GLib.file_set_contents(this._configPath, data);
@@ -595,6 +595,38 @@ export default class MonitoresFlutuantes extends Extension {
                 if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                     console.error(`monitores-flutuantes: falha ao conectar ao NetworkManager: ${e}`);
             }
+        });
+    }
+
+    // Consulta o IP público em um serviço externo; repete periodicamente e tenta de novo após falha.
+    _startPublicIp() {
+        this._soup = new Soup.Session({timeout: 10});
+        this._fetchPublicIp();
+    }
+
+    _fetchPublicIp() {
+        this._publicIpTimeoutId = null;
+        const msg = Soup.Message.new('GET', PUBLIC_IP_URL);
+        this._soup.send_and_read_async(msg, GLib.PRIORITY_DEFAULT, this._cancellable, (session, res) => {
+            let ok = false;
+            try {
+                const bytes = session.send_and_read_finish(res);
+                const text = DECODER.decode(bytes.get_data()).trim();
+                if (msg.get_status() === Soup.Status.OK && /^[0-9a-fA-F.:]+$/.test(text)) {
+                    this._publicIp.text = `IP público: ${text}`;
+                    ok = true;
+                }
+            } catch (e) {
+                if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                    return;
+            }
+            if (!ok)
+                this._publicIp.text = 'IP público: indisponível';
+            this._publicIpTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
+                ok ? PUBLIC_IP_REFRESH_SECONDS : PUBLIC_IP_RETRY_SECONDS, () => {
+                    this._fetchPublicIp();
+                    return GLib.SOURCE_REMOVE;
+                });
         });
     }
 
