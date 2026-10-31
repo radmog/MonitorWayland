@@ -42,7 +42,7 @@ gnome-extensions enable monitores-flutuantes@local
 
 ## Uso
 
-Arraste cada painel com o botão esquerdo do mouse. Clique com o botão direito para alternar o tema. As posições e o tema ficam salvos em `~/.config/monitores-flutuantes.json`.
+Arraste o painel com o botão esquerdo do mouse. Clique com o botão direito para alternar o tema. A posição e o tema são salvos em `~/.config/monitores-flutuantes.json` ao soltar o painel ou trocar de tema (o arquivo só é criado nesse momento).
 
 ## Temas
 
