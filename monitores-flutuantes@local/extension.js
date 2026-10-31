@@ -1,6 +1,7 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
 import NM from 'gi://NM';
 import Pango from 'gi://Pango';
 import Soup from 'gi://Soup?version=3.0';
@@ -242,7 +243,11 @@ export default class MonitoresFlutuantes extends Extension {
 
         this._buildPanels();
         this._themes = this._loadThemes();
-        Main.layoutManager._backgroundGroup.add_child(this._left);
+        // O DING cobre o fundo com uma janela DESKTOP e engole os cliques: o painel
+        // fica no window_group, logo acima das janelas de desktop e abaixo das demais.
+        global.window_group.add_child(this._left);
+        this._restackedId = global.display.connect('restacked', () => this._lowerPanel());
+        this._lowerPanel();
         this._loadConfig();
 
         this._startNetworkManager();
@@ -264,6 +269,10 @@ export default class MonitoresFlutuantes extends Extension {
         if (this._timeoutId) {
             GLib.Source.remove(this._timeoutId);
             this._timeoutId = null;
+        }
+        if (this._restackedId) {
+            global.display.disconnect(this._restackedId);
+            this._restackedId = null;
         }
         this._endDrag();
         this._cancellable?.cancel();
@@ -329,6 +338,18 @@ export default class MonitoresFlutuantes extends Extension {
         this._bgSettings.set_string('picture-uri', theme.uri);
         this._bgSettings.set_string('picture-uri-dark', theme.uri);
         this._left.set_style(`background-color: ${theme.painel};`);
+    }
+
+    _lowerPanel() {
+        let ref = null;
+        for (const actor of global.window_group.get_children()) {
+            if (actor !== this._left && actor.meta_window?.get_window_type() === Meta.WindowType.DESKTOP)
+                ref = actor;
+        }
+        if (ref)
+            global.window_group.set_child_above_sibling(this._left, ref);
+        else
+            global.window_group.set_child_below_sibling(this._left, null);
     }
 
     _makePanel() {

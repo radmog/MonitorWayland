@@ -6,20 +6,18 @@ O GNOME não suporta `wlr-layer-shell`, então o Conky não consegue se fixar no
 
 ## O que mostra
 
-São dois painéis, um em cada lado do monitor, que se movem de forma independente.
+Um único painel, com ícones SVG em cada monitor:
 
-**Esquerda**
 - Relógio e data
 - CPU com histórico, uso por núcleo e frequência
 - Memória (com histórico) e disco `/` (barras: amarelo > 75%, vermelho > 90%)
 - Temperatura da CPU (hwmon) com histórico
 - Bateria (`BAT0`–`BAT3`), quando existir: barra que alerta com carga baixa
-- Rede (download/upload) com histórico, IP e SSID da conexão primária (NetworkManager) e IP do Tailscale, sempre visível
-
-**Direita**
+- Rede (download/upload) com histórico, IP e SSID da conexão primária (NetworkManager), IP público e IP do Tailscale
+- Clima atual e previsão de 5 dias (Open-Meteo)
 - Calendário do mês e próximos eventos (mesmo serviço de calendário do GNOME)
 
-Atualização a cada segundo. Os dados vêm de `/proc`, `/sys`, GIO, D-Bus e libs do próprio Shell, sem dependências externas.
+Métricas de sistema atualizam a cada segundo e vêm de `/proc`, `/sys`, GIO, D-Bus e libs do próprio Shell. O IP público (`api.ipify.org`, a cada 10 min) e o clima (`open-meteo.com`, a cada 30 min) são as únicas consultas à internet; em caso de falha, tentam de novo em até 1 min.
 
 ## Requisitos
 
@@ -42,6 +40,16 @@ gnome-extensions enable monitores-flutuantes@local
 ## Uso
 
 Arraste o painel com o botão esquerdo do mouse. Clique com o botão direito para alternar o tema. A posição e o tema são salvos em `~/.config/monitores-flutuantes.json` ao soltar o painel ou trocar de tema (o arquivo só é criado nesse momento).
+
+### Cidade do clima
+
+O padrão é Manaus - AM. Para mudar, edite o arquivo de configuração:
+
+```json
+{"clima": {"cidade": "São Paulo - SP", "lat": -23.55, "lon": -46.63}}
+```
+
+`cidade` é só o texto exibido; `lat` e `lon` definem a previsão. Requer logout/login (ou desabilitar e habilitar a extensão).
 
 ## Temas
 
@@ -66,9 +74,10 @@ monitores-flutuantes@local/
 ├── metadata.json    # UUID e versões do Shell suportadas
 ├── extension.js     # lógica, widgets e coleta de métricas
 ├── stylesheet.css   # estilo do painel
+├── icons/           # ícones SVG dos monitores
 └── wallpapers/      # temas: imagem + .json opcional
 ```
 
 ## Ideias futuras
 
-Temperaturas e GPU, múltiplos painéis, tela de preferências.
+GPU, tela de preferências (cidade do clima, itens exibidos).
