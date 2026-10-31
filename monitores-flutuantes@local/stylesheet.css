@@ -1,21 +1,37 @@
 .mf-panel {
     background-color: rgba(15, 17, 22, 0.62);
     border-radius: 16px;
-    padding: 14px 18px;
+    padding: 14px 16px;
     spacing: 6px;
-    min-width: 260px;
+    min-width: 250px;
 }
-.mf-title { color: #ffffff; font-size: 13pt; font-weight: bold; }
-.mf-clock { color: #ffffff; font-size: 26pt; font-weight: bold; }
-.mf-date { color: rgba(255,255,255,0.65); font-size: 10pt; }
-.mf-label { color: rgba(255,255,255,0.7); font-size: 10pt; }
+.mf-clock { color: #ffffff; font-size: 24pt; font-weight: bold; }
+.mf-date { color: rgba(255,255,255,0.75); font-size: 9pt; }
+.mf-label { color: rgba(255,255,255,0.85); font-size: 10pt; }
 .mf-value { color: #ffffff; font-size: 10pt; font-weight: bold; }
-.mf-bar-bg { background-color: rgba(255,255,255,0.12); border-radius: 3px; height: 6px; }
-.mf-bar-fill { background-color: #62a0ea; border-radius: 3px; height: 6px; }
+.mf-row { spacing: 10px; padding-top: 4px; }
+.mf-icon { color: #ffffff; }
+.mf-detail { padding-left: 30px; }
+.mf-up { color: #62a0ea; padding-right: 8px; }
+.mf-down { color: #ed333b; }
+.mf-bar-bg { background-color: rgba(255,255,255,0.18); border-radius: 3px; height: 5px; margin-top: 3px; }
+.mf-bar-fill { background-color: #62a0ea; border-radius: 3px; height: 5px; }
+.mf-bar-fill.mf-cpu { background-color: #8aa4bf; }
+.mf-bar-fill.mf-mem { background-color: #3584e4; }
+.mf-bar-fill.mf-disk { background-color: #ff7800; }
+.mf-bar-fill.mf-temp { background-color: #ed333b; }
+.mf-bar-fill.mf-battery { background-color: #33d17a; }
 .mf-bar-fill.warn { background-color: #f5c211; }
 .mf-bar-fill.crit { background-color: #ed333b; }
-.mf-spark { margin-bottom: 4px; }
-.mf-sep { background-color: rgba(255,255,255,0.1); height: 1px; margin: 4px 0; }
-.mf-cal-day { color: rgba(255,255,255,0.7); font-size: 9pt; text-align: center; padding: 1px 0; }
-.mf-cal-head { color: rgba(255,255,255,0.4); font-weight: bold; }
-.mf-cal-today { color: #ffffff; font-weight: bold; background-color: #62a0ea; border-radius: 4px; }
+.mf-sep { background-color: rgba(255,255,255,0.12); height: 1px; margin: 6px 0; }
+.mf-wicon { font-size: 28pt; padding-right: 8px; }
+.mf-wcity { color: #62a0ea; font-size: 10pt; }
+.mf-wtemp { color: #ffffff; font-size: 18pt; font-weight: bold; }
+.mf-wdesc { color: #99c1f1; font-size: 9pt; }
+.mf-fday { spacing: 2px; }
+.mf-fcell { text-align: center; }
+.mf-wsmall { font-size: 13pt; }
+.mf-dot { font-size: 9pt; padding-right: 8px; }
+.mf-cal-day { color: rgba(255,255,255,0.85); font-size: 9pt; text-align: center; padding: 1px 0; }
+.mf-cal-head { color: rgba(255,255,255,0.85); font-weight: bold; font-size: 9pt; }
+.mf-cal-today { color: #ffffff; font-weight: bold; background-color: #3584e4; border-radius: 4px; }

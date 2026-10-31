@@ -11,7 +11,6 @@ São dois painéis, um em cada lado do monitor, que se movem de forma independen
 **Esquerda**
 - Relógio e data
 - CPU com histórico, uso por núcleo e frequência
-- Top 4 processos por CPU, com uso de memória
 - Memória (com histórico) e disco `/` (barras: amarelo > 75%, vermelho > 90%)
 - Temperatura da CPU (hwmon) com histórico
 - Bateria (`BAT0`–`BAT3`), quando existir: barra que alerta com carga baixa
