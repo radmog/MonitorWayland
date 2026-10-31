@@ -14,4 +14,5 @@
 .mf-bar-fill { background-color: #62a0ea; border-radius: 3px; height: 6px; }
 .mf-bar-fill.warn { background-color: #f5c211; }
 .mf-bar-fill.crit { background-color: #ed333b; }
+.mf-spark { margin-bottom: 4px; }
 .mf-sep { background-color: rgba(255,255,255,0.1); height: 1px; margin: 4px 0; }

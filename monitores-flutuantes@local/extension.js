@@ -35,8 +35,62 @@ function formatDuration(seconds) {
     return d > 0 ? `${d}d ${h}h ${m}m` : `${h}h ${m}m`;
 }
 
+// Gráfico de histórico: uma ou mais séries desenhadas com Cairo.
+// `max` fixo (ex.: 1 para frações) ou null para auto-escala.
+class Sparkline {
+    constructor(parent, colors, {max = null, samples = 60} = {}) {
+        this._colors = colors;
+        this._max = max;
+        this._samples = samples;
+        this._series = colors.map(() => []);
+
+        this.actor = new St.DrawingArea({style_class: 'mf-spark', x_expand: true, height: 28});
+        this.actor.connect('repaint', area => this._draw(area));
+        parent.add_child(this.actor);
+    }
+
+    push(...values) {
+        values.forEach((v, i) => {
+            const s = this._series[i];
+            s.push(v);
+            if (s.length > this._samples)
+                s.shift();
+        });
+        this.actor.queue_repaint();
+    }
+
+    _draw(area) {
+        const cr = area.get_context();
+        const [w, h] = area.get_surface_size();
+        const max = this._max ?? Math.max(1, ...this._series.flat());
+        const step = w / (this._samples - 1);
+
+        cr.setLineWidth(1.2);
+        this._series.forEach((s, i) => {
+            if (s.length < 2)
+                return;
+            const [r, g, b] = this._colors[i];
+            const x0 = w - (s.length - 1) * step;
+            const y = v => h - 1 - Math.min(1, v / max) * (h - 2);
+
+            cr.moveTo(x0, y(s[0]));
+            for (let k = 1; k < s.length; k++)
+                cr.lineTo(x0 + k * step, y(s[k]));
+            cr.setSourceRGBA(r, g, b, 1);
+            cr.strokePreserve();
+
+            cr.lineTo(w, h);
+            cr.lineTo(x0, h);
+            cr.closePath();
+            cr.setSourceRGBA(r, g, b, 0.18);
+            cr.fill();
+        });
+        cr.$dispose();
+    }
+}
+
 class Bar {
-    constructor(parent, label) {
+    constructor(parent, label, {history = false} = {}) {
         const row = new St.BoxLayout({x_expand: true});
         this._label = new St.Label({text: label, style_class: 'mf-label', x_expand: true});
         this._value = new St.Label({text: '-', style_class: 'mf-value'});
@@ -48,10 +102,13 @@ class Bar {
         this._fill = new St.Widget({style_class: 'mf-bar-fill', x_align: Clutter.ActorAlign.START});
         this._bg.add_child(this._fill);
         parent.add_child(this._bg);
+
+        this._spark = history ? new Sparkline(parent, [[0.38, 0.63, 0.92]], {max: 1}) : null;
     }
 
     update(fraction, text) {
         fraction = Math.max(0, Math.min(1, fraction));
+        this._spark?.push(fraction);
         this._value.text = text;
         const width = this._bg.width;
         this._fill.width = Math.round(width * fraction);
@@ -103,17 +160,19 @@ export default class MonitoresFlutuantes extends Extension {
         this._panel.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
 
         this._bars = {
-            cpu: new Bar(this._panel, 'CPU'),
-            mem: new Bar(this._panel, 'Memória'),
+            cpu: new Bar(this._panel, 'CPU', {history: true}),
+            mem: new Bar(this._panel, 'Memória', {history: true}),
             swap: new Bar(this._panel, 'Swap'),
             disk: new Bar(this._panel, 'Disco /'),
         };
 
         this._panel.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
         this._net = new St.Label({style_class: 'mf-label'});
+        this._panel.add_child(this._net);
+        // verde = download, laranja = upload
+        this._netSpark = new Sparkline(this._panel, [[0.34, 0.8, 0.52], [0.96, 0.47, 0]]);
         this._load = new St.Label({style_class: 'mf-label'});
         this._uptime = new St.Label({style_class: 'mf-label'});
-        this._panel.add_child(this._net);
         this._panel.add_child(this._load);
         this._panel.add_child(this._uptime);
 
@@ -252,6 +311,7 @@ export default class MonitoresFlutuantes extends Extension {
             const down = Math.max(0, (rx - this._prevNet.rx) / dt);
             const up = Math.max(0, (tx - this._prevNet.tx) / dt);
             this._net.text = `Rede: ↓ ${formatBytes(down)}/s   ↑ ${formatBytes(up)}/s`;
+            this._netSpark.push(down, up);
         }
         this._prevNet = {rx, tx, t};
     }
