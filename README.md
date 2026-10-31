@@ -6,23 +6,19 @@ O GNOME não suporta `wlr-layer-shell`, então o Conky não consegue se fixar no
 
 ## O que mostra
 
-O painel tem duas colunas, que se movem juntas.
+São dois painéis, um em cada lado do monitor, que se movem de forma independente.
 
-**Esquerda (hardware)**
+**Esquerda**
 - Relógio e data
 - CPU com histórico, uso por núcleo e frequência
-- Memória (com histórico), swap e disco `/` (barras: amarelo > 75%, vermelho > 90%)
+- Top 4 processos por CPU, com uso de memória
+- Memória (com histórico) e disco `/` (barras: amarelo > 75%, vermelho > 90%)
 - Temperatura da CPU (hwmon) com histórico
 - Bateria (`BAT0`–`BAT3`), quando existir: barra que alerta com carga baixa
-- Pressão do sistema (PSI) de CPU, memória e I/O
+- Rede (download/upload) com histórico, IP e SSID da conexão primária (NetworkManager) e IP do Tailscale, sempre visível
 
 **Direita**
-- Rede (download/upload) com histórico, IP e SSID da conexão primária (NetworkManager) e IP do Tailscale, sempre visível
-- I/O de disco (leitura/escrita) com histórico
-- Top 4 processos por CPU, com uso de memória
-- Volume e música tocando (MPRIS)
 - Calendário do mês e próximos eventos (mesmo serviço de calendário do GNOME)
-- Carga do sistema, uptime e atualizações pendentes (lidas de `/var/lib/update-notifier/updates-available`)
 
 Atualização a cada segundo. Os dados vêm de `/proc`, `/sys`, GIO, D-Bus e libs do próprio Shell, sem dependências externas.
 
@@ -46,7 +42,7 @@ gnome-extensions enable monitores-flutuantes@local
 
 ## Uso
 
-Arraste o painel com o botão esquerdo do mouse. Clique com o botão direito para alternar o tema. A posição e o tema ficam salvos em `~/.config/monitores-flutuantes.json`.
+Arraste cada painel com o botão esquerdo do mouse. Clique com o botão direito para alternar o tema. As posições e o tema ficam salvos em `~/.config/monitores-flutuantes.json`.
 
 ## Temas
 

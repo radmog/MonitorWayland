@@ -1,7 +1,6 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import Gvc from 'gi://Gvc';
 import NM from 'gi://NM';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
@@ -12,21 +11,17 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const INTERVAL_SECONDS = 1;
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'];
+const MARGIN = 40;
 const PANEL_BG_DEFAULT = 'rgba(15, 17, 22, 0.62)';
 const DECODER = new TextDecoder();
 const CPU_SENSORS = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'acpitz'];
-const DISK_DEVICE = /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+|mmcblk\d+)$/;
 const TOP_PROCESSES = 4;
 const CLOCK_TICKS = 100;
 const PAGE_SIZE = 4096;
-const UPDATES_FILE = '/var/lib/update-notifier/updates-available';
-const UPDATES_EVERY = 60;
 const UPCOMING_EVENTS = 3;
 const EVENTS_WINDOW_DAYS = 14;
 const TAILSCALE_IFACE = 'tailscale0';
 const WEEKDAYS = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'];
-
-Gio._promisify(Gio.DBusConnection.prototype, 'call', 'call_finish');
 
 function readText(path) {
     try {
@@ -45,13 +40,6 @@ function formatBytes(n) {
         i++;
     }
     return `${n.toFixed(i === 0 ? 0 : 1)}${units[i]}`;
-}
-
-function formatDuration(seconds) {
-    const d = Math.floor(seconds / 86400);
-    const h = Math.floor((seconds % 86400) / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    return d > 0 ? `${d}d ${h}h ${m}m` : `${h}h ${m}m`;
 }
 
 // Caminho do sensor de temperatura da CPU: o primeiro hwmon de CPU_SENSORS, por ordem de preferência.
@@ -202,12 +190,9 @@ export default class MonitoresFlutuantes extends Extension {
         this._configPath = GLib.build_filenamev([GLib.get_user_config_dir(), 'monitores-flutuantes.json']);
         this._prevCpu = null;
         this._prevNet = null;
-        this._prevDisk = null;
         this._prevProcs = null;
         this._cancellable = new Gio.Cancellable();
-        this._refreshCount = 0;
         this._calendarDay = null;
-        this._mprisBusy = false;
         this._tempPath = findCpuTempPath();
         this._batteryPath = findBatteryPath();
         this._dragging = false;
@@ -217,13 +202,13 @@ export default class MonitoresFlutuantes extends Extension {
             dark: this._bgSettings.get_string('picture-uri-dark'),
         };
 
-        this._buildPanel();
+        this._buildPanels();
         this._themes = this._loadThemes();
+        Main.layoutManager._backgroundGroup.add_child(this._left);
+        Main.layoutManager._backgroundGroup.add_child(this._right);
         this._loadConfig();
-        Main.layoutManager._backgroundGroup.add_child(this._panel);
 
         this._startNetworkManager();
-        this._startMixer();
         this._startEventSource();
 
         this._refresh();
@@ -242,8 +227,6 @@ export default class MonitoresFlutuantes extends Extension {
         this._cancellable?.cancel();
         this._cancellable = null;
         this._nm = null;
-        this._mixer?.close();
-        this._mixer = null;
         if (this._eventSource) {
             this._eventSource.disconnect(this._eventsChangedId);
             this._eventSource.destroy();
@@ -255,8 +238,10 @@ export default class MonitoresFlutuantes extends Extension {
         }
         this._bgSettings = null;
         this._themes = null;
-        this._panel?.destroy();
-        this._panel = null;
+        this._left?.destroy();
+        this._right?.destroy();
+        this._left = null;
+        this._right = null;
         this._bars = null;
     }
 
@@ -299,21 +284,35 @@ export default class MonitoresFlutuantes extends Extension {
         const theme = this._themes[this._themeIndex];
         this._bgSettings.set_string('picture-uri', theme.uri);
         this._bgSettings.set_string('picture-uri-dark', theme.uri);
-        this._panel.set_style(`background-color: ${theme.painel};`);
+        for (const panel of [this._left, this._right])
+            panel.set_style(`background-color: ${theme.painel};`);
     }
 
-    _buildPanel() {
-        this._panel = new St.BoxLayout({
+    _makePanel() {
+        const panel = new St.BoxLayout({
             style_class: 'mf-panel',
+            vertical: true,
             reactive: true,
             track_hover: true,
         });
-        // esquerda: hardware; direita: rede, processos, mídia e agenda
-        const left = new St.BoxLayout({vertical: true, style_class: 'mf-column'});
-        const right = new St.BoxLayout({vertical: true, style_class: 'mf-column'});
-        this._panel.add_child(left);
-        this._panel.add_child(right);
-        let col = left;
+        panel.connect('button-press-event', (actor, event) => {
+            const button = event.get_button();
+            if (button === Clutter.BUTTON_SECONDARY) {
+                this._applyTheme(this._themeIndex + 1);
+                this._saveConfig();
+                return Clutter.EVENT_STOP;
+            }
+            if (button !== Clutter.BUTTON_PRIMARY)
+                return Clutter.EVENT_PROPAGATE;
+            this._startDrag(panel, event);
+            return Clutter.EVENT_STOP;
+        });
+        return panel;
+    }
+
+    // esquerda: hardware, processos e rede; direita: agenda
+    _buildPanels() {
+        let col = this._left = this._makePanel();
 
         this._clock = new St.Label({style_class: 'mf-clock'});
         this._date = new St.Label({style_class: 'mf-date'});
@@ -325,30 +324,6 @@ export default class MonitoresFlutuantes extends Extension {
         this._coreBars = new CoreBars(col);
         this._freq = new St.Label({style_class: 'mf-label'});
         col.add_child(this._freq);
-        this._bars.mem = new Bar(col, 'Memória', {history: true});
-        this._bars.swap = new Bar(col, 'Swap');
-        this._bars.disk = new Bar(col, 'Disco /');
-        if (this._tempPath)
-            this._bars.temp = new Bar(col, 'Temperatura', {history: true, historyMax: 1});
-        if (this._batteryPath)
-            this._bars.battery = new Bar(col, 'Bateria', {invert: true});
-        this._pressure = new St.Label({style_class: 'mf-label'});
-        col.add_child(this._pressure);
-
-        col = right;
-        this._net = new St.Label({style_class: 'mf-label'});
-        col.add_child(this._net);
-        // verde = download, laranja = upload
-        this._netSpark = new Sparkline(col, [[0.34, 0.8, 0.52], [0.96, 0.47, 0]]);
-        this._ip = new St.Label({style_class: 'mf-label'});
-        this._tailscale = new St.Label({style_class: 'mf-label'});
-        col.add_child(this._ip);
-        col.add_child(this._tailscale);
-        this._diskIo = new St.Label({style_class: 'mf-label'});
-        col.add_child(this._diskIo);
-        // azul = leitura, laranja = escrita
-        this._diskSpark = new Sparkline(col, [[0.38, 0.63, 0.92], [0.96, 0.47, 0]]);
-
         col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
         this._procRows = [];
         for (let i = 0; i < TOP_PROCESSES; i++) {
@@ -362,12 +337,23 @@ export default class MonitoresFlutuantes extends Extension {
         }
 
         col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
-        this._bars.volume = new Bar(col, 'Volume');
-        this._music = new St.Label({style_class: 'mf-label'});
-        this._music.clutter_text.set_ellipsize(Pango.EllipsizeMode.END);
-        col.add_child(this._music);
-
+        this._bars.mem = new Bar(col, 'Memória', {history: true});
+        this._bars.disk = new Bar(col, 'Disco /');
+        if (this._tempPath)
+            this._bars.temp = new Bar(col, 'Temperatura', {history: true, historyMax: 1});
+        if (this._batteryPath)
+            this._bars.battery = new Bar(col, 'Bateria', {invert: true});
         col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
+        this._net = new St.Label({style_class: 'mf-label'});
+        col.add_child(this._net);
+        // verde = download, laranja = upload
+        this._netSpark = new Sparkline(col, [[0.34, 0.8, 0.52], [0.96, 0.47, 0]]);
+        this._ip = new St.Label({style_class: 'mf-label'});
+        this._tailscale = new St.Label({style_class: 'mf-label'});
+        col.add_child(this._ip);
+        col.add_child(this._tailscale);
+
+        col = this._right = this._makePanel();
         this._calTitle = new St.Label({style_class: 'mf-value'});
         this._calGrid = new St.BoxLayout({vertical: true, x_expand: true});
         col.add_child(this._calTitle);
@@ -379,38 +365,17 @@ export default class MonitoresFlutuantes extends Extension {
             col.add_child(label);
             this._eventRows.push(label);
         }
-
-        col.add_child(new St.Widget({style_class: 'mf-sep', x_expand: true}));
-        this._load = new St.Label({style_class: 'mf-label'});
-        this._uptime = new St.Label({style_class: 'mf-label'});
-        this._updates = new St.Label({style_class: 'mf-label'});
-        col.add_child(this._load);
-        col.add_child(this._uptime);
-        col.add_child(this._updates);
-
-        this._panel.connect('button-press-event', (actor, event) => {
-            const button = event.get_button();
-            if (button === Clutter.BUTTON_SECONDARY) {
-                this._applyTheme(this._themeIndex + 1);
-                this._saveConfig();
-                return Clutter.EVENT_STOP;
-            }
-            if (button !== Clutter.BUTTON_PRIMARY)
-                return Clutter.EVENT_PROPAGATE;
-            this._startDrag(event);
-            return Clutter.EVENT_STOP;
-        });
     }
 
-    _startDrag(event) {
+    _startDrag(panel, event) {
         const [x, y] = event.get_coords();
-        this._dragOffset = [x - this._panel.x, y - this._panel.y];
+        this._dragOffset = [x - panel.x, y - panel.y];
         this._dragging = true;
         this._motionId = global.stage.connect('captured-event', (stage, ev) => {
             const type = ev.type();
             if (type === Clutter.EventType.MOTION) {
                 const [mx, my] = ev.get_coords();
-                this._panel.set_position(
+                panel.set_position(
                     Math.round(mx - this._dragOffset[0]),
                     Math.round(my - this._dragOffset[1]));
                 return Clutter.EVENT_STOP;
@@ -432,19 +397,27 @@ export default class MonitoresFlutuantes extends Extension {
         this._dragging = false;
     }
 
+    // Padrão: um painel em cada lado do monitor primário.
     _loadConfig() {
-        let x = 40, y = 60, tema = null;
+        const monitor = Main.layoutManager.primaryMonitor;
+        const [, rightWidth] = this._right.get_preferred_width(-1);
+        const pos = {
+            left: [monitor.x + MARGIN, monitor.y + 60],
+            right: [monitor.x + monitor.width - rightWidth - MARGIN, monitor.y + 60],
+        };
+        let tema = null;
         try {
             const cfg = JSON.parse(readText(this._configPath));
-            if (Number.isFinite(cfg.x) && Number.isFinite(cfg.y)) {
-                x = cfg.x;
-                y = cfg.y;
+            for (const side of ['left', 'right']) {
+                if (Number.isFinite(cfg[side]?.x) && Number.isFinite(cfg[side]?.y))
+                    pos[side] = [cfg[side].x, cfg[side].y];
             }
             tema = cfg.tema ?? null;
         } catch (e) {
             // sem configuração salva: usa os padrões
         }
-        this._panel.set_position(x, y);
+        this._left.set_position(...pos.left);
+        this._right.set_position(...pos.right);
         this._themeIndex = Math.max(0, this._themes.findIndex(t => t.nome === tema));
         this._applyTheme(this._themeIndex);
     }
@@ -452,8 +425,8 @@ export default class MonitoresFlutuantes extends Extension {
     _saveConfig() {
         try {
             const data = JSON.stringify({
-                x: this._panel.x,
-                y: this._panel.y,
+                left: {x: this._left.x, y: this._left.y},
+                right: {x: this._right.x, y: this._right.y},
                 tema: this._themes[this._themeIndex]?.nome ?? null,
             });
             GLib.file_set_contents(this._configPath, data);
@@ -463,7 +436,7 @@ export default class MonitoresFlutuantes extends Extension {
     }
 
     _refresh() {
-        if (!this._panel)
+        if (!this._left)
             return;
 
         const now = GLib.DateTime.new_now_local();
@@ -476,20 +449,9 @@ export default class MonitoresFlutuantes extends Extension {
         this._updateNet();
         this._updateTemp();
         this._updateBattery();
-        this._updateDiskIo();
         this._updateProcesses();
-        this._updatePressure();
         this._updateNetworkInfo();
-        this._updateVolume();
-        this._updateMusic();
         this._updateCalendar();
-        if (this._refreshCount++ % UPDATES_EVERY === 0)
-            this._updateUpdates();
-
-        const load = readText('/proc/loadavg').split(' ');
-        this._load.text = `Carga: ${load.slice(0, 3).join('  ')}`;
-        const up = parseFloat(readText('/proc/uptime').split(' ')[0]);
-        this._uptime.text = `Uptime: ${formatDuration(up)}`;
     }
 
     _updateCpu() {
@@ -531,9 +493,6 @@ export default class MonitoresFlutuantes extends Extension {
         }
         const used = info.MemTotal - info.MemAvailable;
         this._bars.mem.update(used / info.MemTotal, `${formatBytes(used)} / ${formatBytes(info.MemTotal)}`);
-        const swapUsed = info.SwapTotal - info.SwapFree;
-        this._bars.swap.update(info.SwapTotal ? swapUsed / info.SwapTotal : 0,
-            info.SwapTotal ? `${formatBytes(swapUsed)} / ${formatBytes(info.SwapTotal)}` : 'desativado');
     }
 
     _updateDisk() {
@@ -587,26 +546,6 @@ export default class MonitoresFlutuantes extends Extension {
             {alert: status !== 'Charging' && status !== 'Full'});
     }
 
-    _updateDiskIo() {
-        let read = 0, written = 0;
-        for (const l of readText('/proc/diskstats').split('\n')) {
-            const f = l.trim().split(/\s+/);
-            if (DISK_DEVICE.test(f[2] ?? '')) {
-                read += Number(f[5]) * 512;
-                written += Number(f[9]) * 512;
-            }
-        }
-        const t = GLib.get_monotonic_time() / 1e6;
-        if (this._prevDisk) {
-            const dt = t - this._prevDisk.t || 1;
-            const r = Math.max(0, (read - this._prevDisk.read) / dt);
-            const w = Math.max(0, (written - this._prevDisk.written) / dt);
-            this._diskIo.text = `Disco I/O: R ${formatBytes(r)}/s   W ${formatBytes(w)}/s`;
-            this._diskSpark.push(r, w);
-        }
-        this._prevDisk = {read, written, t};
-    }
-
     // Uso de CPU por processo = variação de utime+stime entre duas leituras.
     _updateProcesses() {
         const t = GLib.get_monotonic_time() / 1e6;
@@ -645,14 +584,6 @@ export default class MonitoresFlutuantes extends Extension {
             });
         }
         this._prevProcs = {t, ticks: new Map([...procs].map(([pid, p]) => [pid, p.ticks]))};
-    }
-
-    _updatePressure() {
-        const parts = ['cpu', 'memory', 'io'].map(res => {
-            const m = readText(`/proc/pressure/${res}`).match(/some avg10=([\d.]+)/);
-            return m ? `${parseFloat(m[1]).toFixed(1)}%` : 'n/d';
-        });
-        this._pressure.text = `Pressão: CPU ${parts[0]}  Mem ${parts[1]}  I/O ${parts[2]}`;
     }
 
     _startNetworkManager() {
@@ -695,63 +626,6 @@ export default class MonitoresFlutuantes extends Extension {
         }
         this._ip.text = `IP: ${ip}`;
         this._tailscale.text = `Tailscale: ${tailscale}`;
-    }
-
-    _startMixer() {
-        this._mixer = new Gvc.MixerControl({name: 'Monitores Flutuantes'});
-        this._mixer.open();
-    }
-
-    _updateVolume() {
-        const sink = this._mixer?.get_default_sink();
-        if (!sink) {
-            this._bars.volume.update(0, 'n/d', {alert: false});
-            return;
-        }
-        const fraction = sink.volume / this._mixer.get_vol_max_norm();
-        this._bars.volume.update(sink.is_muted ? 0 : fraction,
-            sink.is_muted ? 'mudo' : `${Math.round(fraction * 100)}%`, {alert: false});
-    }
-
-    // MPRIS: prefere um player tocando; senão, o primeiro pausado.
-    async _updateMusic() {
-        if (this._mprisBusy)
-            return;
-        this._mprisBusy = true;
-        try {
-            const call = (name, path, iface, method, params, type) => Gio.DBus.session.call(
-                name, path, iface, method, params, GLib.VariantType.new(type),
-                Gio.DBusCallFlags.NONE, 500, this._cancellable);
-
-            const names = (await call('org.freedesktop.DBus', '/org/freedesktop/DBus',
-                'org.freedesktop.DBus', 'ListNames', null, '(as)')).deepUnpack()[0]
-                .filter(n => n.startsWith('org.mpris.MediaPlayer2.'));
-
-            let best = null;
-            for (const name of names) {
-                const props = (await call(name, '/org/mpris/MediaPlayer2', 'org.freedesktop.DBus.Properties',
-                    'GetAll', new GLib.Variant('(s)', ['org.mpris.MediaPlayer2.Player']), '(a{sv})'))
-                    .recursiveUnpack()[0];
-                if (!best || props.PlaybackStatus === 'Playing')
-                    best = props;
-                if (props.PlaybackStatus === 'Playing')
-                    break;
-            }
-            if (!this._panel)
-                return;
-            if (!best?.Metadata?.['xesam:title']) {
-                this._music.text = '♪ nada tocando';
-                return;
-            }
-            const artist = [best.Metadata['xesam:artist']].flat().filter(Boolean).join(', ');
-            const icon = best.PlaybackStatus === 'Playing' ? '▶' : '⏸';
-            this._music.text = `${icon} ${artist ? `${artist} – ` : ''}${best.Metadata['xesam:title']}`;
-        } catch (e) {
-            if (this._panel)
-                this._music.text = '♪ nada tocando';
-        } finally {
-            this._mprisBusy = false;
-        }
     }
 
     _startEventSource() {
@@ -814,17 +688,5 @@ export default class MonitoresFlutuantes extends Extension {
                 (e.end - e.date) % 86400000 === 0;
             label.text = `${when.format(allDay ? '%d/%m' : '%d/%m %H:%M')}  ${e.summary}`;
         });
-    }
-
-    // Arquivo mantido pelo update-notifier; evita consultar o apt.
-    _updateUpdates() {
-        const text = readText(UPDATES_FILE);
-        const total = text.match(/(\d+) updates? can be applied/);
-        if (!total) {
-            this._updates.text = 'Atualizações: n/d';
-            return;
-        }
-        const security = text.match(/(\d+) of these updates? (?:is|are) (?:a )?standard security/);
-        this._updates.text = `Atualizações: ${total[1]}` + (security ? ` (${security[1]} de segurança)` : '');
     }
 }
