@@ -33,7 +33,17 @@ gnome-extensions enable monitores-flutuantes@local
 
 ## Uso
 
-Arraste o painel com o botão esquerdo do mouse. A posição fica salva em `~/.config/monitores-flutuantes.json`.
+Arraste o painel com o botão esquerdo do mouse. Clique com o botão direito para alternar o tema. A posição e o tema ficam salvos em `~/.config/monitores-flutuantes.json`.
+
+## Temas
+
+Cada imagem (`.png`, `.jpg`, `.jpeg`, `.webp`) em `monitores-flutuantes@local/wallpapers/` é um tema: ao ativá-lo a extensão troca o papel de parede do GNOME e, ao desabilitar a extensão, restaura o original. Um `.json` de mesmo nome da imagem é opcional:
+
+```json
+{"nome": "Amazônia – Manaus", "painel": "rgba(8, 28, 20, 0.62)"}
+```
+
+`nome` identifica o tema (padrão: nome do arquivo) e `painel` é a cor de fundo do painel.
 
 ## Depuração
 
@@ -47,7 +57,8 @@ journalctl -f -o cat /usr/bin/gnome-shell
 monitores-flutuantes@local/
 ├── metadata.json    # UUID e versões do Shell suportadas
 ├── extension.js     # lógica, widgets e coleta de métricas
-└── stylesheet.css   # estilo do painel
+├── stylesheet.css   # estilo do painel
+└── wallpapers/      # temas: imagem + .json opcional
 ```
 
 ## Ideias futuras

@@ -7,6 +7,8 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const INTERVAL_SECONDS = 1;
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'];
+const PANEL_BG_DEFAULT = 'rgba(15, 17, 22, 0.62)';
 const DECODER = new TextDecoder();
 
 function readText(path) {
@@ -122,9 +124,15 @@ export default class MonitoresFlutuantes extends Extension {
         this._prevCpu = null;
         this._prevNet = null;
         this._dragging = false;
+        this._bgSettings = new Gio.Settings({schema_id: 'org.gnome.desktop.background'});
+        this._bgOriginal = {
+            light: this._bgSettings.get_string('picture-uri'),
+            dark: this._bgSettings.get_string('picture-uri-dark'),
+        };
 
         this._buildPanel();
-        this._loadPosition();
+        this._themes = this._loadThemes();
+        this._loadConfig();
         Main.layoutManager._backgroundGroup.add_child(this._panel);
 
         this._refresh();
@@ -140,9 +148,57 @@ export default class MonitoresFlutuantes extends Extension {
             this._timeoutId = null;
         }
         this._endDrag();
+        if (this._bgSettings) {
+            this._bgSettings.set_string('picture-uri', this._bgOriginal.light);
+            this._bgSettings.set_string('picture-uri-dark', this._bgOriginal.dark);
+        }
+        this._bgSettings = null;
+        this._themes = null;
         this._panel?.destroy();
         this._panel = null;
         this._bars = null;
+    }
+
+    // Cada imagem em wallpapers/ é um tema; um .json de mesmo nome pode definir
+    // `nome` e `painel` (cor de fundo do painel).
+    _loadThemes() {
+        const dir = Gio.File.new_for_path(GLib.build_filenamev([this.path, 'wallpapers']));
+        const themes = [];
+        try {
+            const en = dir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            let info;
+            while ((info = en.next_file(null))) {
+                const file = info.get_name();
+                const ext = IMAGE_EXTENSIONS.find(e => file.toLowerCase().endsWith(e));
+                if (!ext)
+                    continue;
+                const base = file.slice(0, -ext.length);
+                let meta = {};
+                try {
+                    meta = JSON.parse(readText(dir.get_child(`${base}.json`).get_path()));
+                } catch (e) {
+                    // sem metadados: usa os padrões
+                }
+                themes.push({
+                    nome: meta.nome ?? base,
+                    painel: meta.painel ?? PANEL_BG_DEFAULT,
+                    uri: dir.get_child(file).get_uri(),
+                });
+            }
+        } catch (e) {
+            console.error(`monitores-flutuantes: falha ao listar wallpapers: ${e}`);
+        }
+        return themes.sort((a, b) => a.nome.localeCompare(b.nome));
+    }
+
+    _applyTheme(index) {
+        if (!this._themes.length)
+            return;
+        this._themeIndex = ((index % this._themes.length) + this._themes.length) % this._themes.length;
+        const theme = this._themes[this._themeIndex];
+        this._bgSettings.set_string('picture-uri', theme.uri);
+        this._bgSettings.set_string('picture-uri-dark', theme.uri);
+        this._panel.set_style(`background-color: ${theme.painel};`);
     }
 
     _buildPanel() {
@@ -177,7 +233,13 @@ export default class MonitoresFlutuantes extends Extension {
         this._panel.add_child(this._uptime);
 
         this._panel.connect('button-press-event', (actor, event) => {
-            if (event.get_button() !== Clutter.BUTTON_PRIMARY)
+            const button = event.get_button();
+            if (button === Clutter.BUTTON_SECONDARY) {
+                this._applyTheme(this._themeIndex + 1);
+                this._saveConfig();
+                return Clutter.EVENT_STOP;
+            }
+            if (button !== Clutter.BUTTON_PRIMARY)
                 return Clutter.EVENT_PROPAGATE;
             this._startDrag(event);
             return Clutter.EVENT_STOP;
@@ -199,7 +261,7 @@ export default class MonitoresFlutuantes extends Extension {
             }
             if (type === Clutter.EventType.BUTTON_RELEASE) {
                 this._endDrag();
-                this._savePosition();
+                this._saveConfig();
                 return Clutter.EVENT_STOP;
             }
             return Clutter.EVENT_PROPAGATE;
@@ -214,26 +276,33 @@ export default class MonitoresFlutuantes extends Extension {
         this._dragging = false;
     }
 
-    _loadPosition() {
-        let x = 40, y = 60;
+    _loadConfig() {
+        let x = 40, y = 60, tema = null;
         try {
-            const pos = JSON.parse(readText(this._configPath));
-            if (Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
-                x = pos.x;
-                y = pos.y;
+            const cfg = JSON.parse(readText(this._configPath));
+            if (Number.isFinite(cfg.x) && Number.isFinite(cfg.y)) {
+                x = cfg.x;
+                y = cfg.y;
             }
+            tema = cfg.tema ?? null;
         } catch (e) {
-            // sem configuração salva: usa a posição padrão
+            // sem configuração salva: usa os padrões
         }
         this._panel.set_position(x, y);
+        this._themeIndex = Math.max(0, this._themes.findIndex(t => t.nome === tema));
+        this._applyTheme(this._themeIndex);
     }
 
-    _savePosition() {
+    _saveConfig() {
         try {
-            const data = JSON.stringify({x: this._panel.x, y: this._panel.y});
+            const data = JSON.stringify({
+                x: this._panel.x,
+                y: this._panel.y,
+                tema: this._themes[this._themeIndex]?.nome ?? null,
+            });
             GLib.file_set_contents(this._configPath, data);
         } catch (e) {
-            console.error(`monitores-flutuantes: falha ao salvar posição: ${e}`);
+            console.error(`monitores-flutuantes: falha ao salvar configuração: ${e}`);
         }
     }
 
