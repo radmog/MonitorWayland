@@ -10,3 +10,4 @@
 *.key
 node_modules/
 *.log
+monitores-flutuantes@local/exemplo/
