@@ -14,6 +14,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 const INTERVAL_SECONDS = 1;
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp'];
 const MARGIN = 40;
+const MIN_VISIVEL = 100;
 const PANEL_BG_DEFAULT = 'rgba(15, 17, 22, 0.62)';
 const DECODER = new TextDecoder();
 const CPU_SENSORS = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'acpitz'];
@@ -249,6 +250,7 @@ export default class MonitoresFlutuantes extends Extension {
         this._restackedId = global.display.connect('restacked', () => this._lowerPanel());
         this._lowerPanel();
         this._loadConfig();
+        this._monitorsId = Main.layoutManager.connect('monitors-changed', () => this._placePanel());
 
         this._startNetworkManager();
         this._soup = new Soup.Session({timeout: 10});
@@ -273,6 +275,10 @@ export default class MonitoresFlutuantes extends Extension {
         if (this._restackedId) {
             global.display.disconnect(this._restackedId);
             this._restackedId = null;
+        }
+        if (this._monitorsId) {
+            Main.layoutManager.disconnect(this._monitorsId);
+            this._monitorsId = null;
         }
         this._endDrag();
         this._cancellable?.cancel();
@@ -510,27 +516,40 @@ export default class MonitoresFlutuantes extends Extension {
     }
 
     _loadConfig() {
-        const monitor = Main.layoutManager.primaryMonitor;
-        let pos = [monitor.x + MARGIN, monitor.y + 60];
         let tema = null;
         try {
             const cfg = JSON.parse(readText(this._configPath));
             if (Number.isFinite(cfg.left?.x) && Number.isFinite(cfg.left?.y))
-                pos = [cfg.left.x, cfg.left.y];
+                this._savedPos = [cfg.left.x, cfg.left.y];
             tema = cfg.tema ?? null;
             if (Number.isFinite(cfg.clima?.lat) && Number.isFinite(cfg.clima?.lon))
                 this._weather = {...DEFAULT_WEATHER, ...cfg.clima};
         } catch (e) {
             // sem configuração salva: usa os padrões
         }
-        this._left.set_position(...pos);
+        this._placePanel();
         this._themeIndex = Math.max(0, this._themes.findIndex(t => t.nome === tema));
         this._applyTheme(this._themeIndex);
         this._wCity.text = this._weather.cidade;
     }
 
+    // A posição salva pode cair fora das telas atuais (ex.: segundo monitor desconectado).
+    // O ajuste não é gravado, então ao religar o monitor a posição original volta.
+    _placePanel() {
+        const monitors = Main.layoutManager.monitors;
+        const primary = Main.layoutManager.primaryMonitor;
+        let [x, y] = this._savedPos ?? [primary.x + MARGIN, primary.y + 60];
+        const visible = monitors.find(m =>
+            x >= m.x && x <= m.x + m.width - MIN_VISIVEL &&
+            y >= m.y && y <= m.y + m.height - MIN_VISIVEL);
+        if (!visible)
+            [x, y] = [primary.x + MARGIN, primary.y + 60];
+        this._left.set_position(x, y);
+    }
+
     _saveConfig() {
         try {
+            this._savedPos = [this._left.x, this._left.y];
             const data = JSON.stringify({
                 left: {x: this._left.x, y: this._left.y},
                 tema: this._themes[this._themeIndex]?.nome ?? null,
